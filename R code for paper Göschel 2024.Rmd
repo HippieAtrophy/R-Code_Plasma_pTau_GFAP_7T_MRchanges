@@ -1,0 +1,1141 @@
+---
+title: "Plasma p-Tau181 and GFAP track 7T MR-based changes in Alzheimer’s disease"
+author: "Laura Göschel"
+date: "29.11.2023"
+output:
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: paper
+    code_folding: hide
+always_allow_html: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{css, echo = FALSE}
+caption {
+      color: black;
+    }
+```
+
+```{r library setup, include=FALSE}
+library(readxl)
+library(gtsummary)
+library(tidyverse)
+library(ggpubr)
+library(flextable)
+library(kableExtra)
+library(ggeffects)
+library(lme4)
+library(emmeans)
+library(finalfit)
+library(patchwork)
+library(knitr)
+library(ggtext)
+library(Ckmeans.1d.dp)
+```
+
+# Statistical Analysis Code Disclaimer
+
+ This R script contains the code used for the statistical analysis of the research paper titled
+ "Plasma p-Tau181 and GFAP track 7T MR-based changes in Alzheimer’s disease." The purpose of
+ sharing this code is to provide transparency and facilitate reproducibility of the reported
+ results. Please note the following:
+
+ 1. I am not a professional statistician or IT expert. The code provided here may have flaws
+    or suboptimal practices.
+
+ 2. Use this code at your own risk. I make no guarantees about the correctness or reliability
+    of the code.
+
+ 3. Feel free to use, modify, and distribute this code for educational and research purposes,
+    but be aware that it comes with no warranty or support.
+
+ 4. If you encounter issues or have suggestions for improvement, please consider contributing
+    by submitting a pull request or opening an issue on the GitHub repository.
+
+ 5. This code is provided "as is", and I disclaim any responsibility or liability for any
+    errors, inaccuracies, or consequences arising from the use of this code.
+
+Thank you for your understanding and collaboration in promoting open and transparent science.
+
+```{r Data preparation, include = FALSE}
+NeuroMET <- read_excel("yourdata.xlsx", 
+    sheet = "yourdatasheet")
+
+
+NeuroMET$diagnose <- factor(NeuroMET$diagnose, labels=c('HC', 'SCD', 'MCI','AD'))
+NeuroMET <- NeuroMET %>% filter(!is.na(diagnose))
+NeuroMET <- NeuroMET %>% filter(!(Visit == 'smartage'))
+NeuroMET$Visit <- factor(NeuroMET$Visit, labels=c('t1', 't2','t3', 't4', 't5'))
+
+NeuroMET$APOE <- factor(NeuroMET$APOE, labels=c('22','23','24','33','34','44'))
+NeuroMET$APOEe4 <- ifelse(NeuroMET$APOE=="22" | NeuroMET$APOE=="23" | NeuroMET$APOE=="33", "0", "1")
+NeuroMET$APOEe4 <- factor(NeuroMET$APOEe4, labels=c('non-carrier','carrier'))
+
+NeuroMET$edu <- as.numeric(NeuroMET$education_years_cerad)
+
+#global cognition
+NeuroMET$mmse <- as.numeric(NeuroMET$mmst_sum)
+
+#memory + executive function 
+NeuroMET$nmm <- as.numeric(NeuroMET$NMM_value)
+NeuroMET$rwt_food_count <- as.numeric(NeuroMET$rwt_food_count)
+
+#calulate z-scores
+NeuroMET$cer_vf_anim_count[NeuroMET$cer_vf_anim_count == "NaN"] <- NA
+
+sum <- NeuroMET %>%
+  filter(diagnose == 'HC'& Visit  == 't1')%>%
+  dplyr::summarise(mean_animals = mean(cer_vf_anim_count, na.rm = TRUE), sd_animals = sd(cer_vf_anim_count, na.rm = TRUE),
+            mean_s = mean(cer_vf_s_count, na.rm = TRUE), sd_s = sd(cer_vf_s_count, na.rm = TRUE),
+            mean_digitsymbol = mean(ds_total_score, na.rm = TRUE), sd_digitsymbol = sd(ds_total_score, na.rm = TRUE),
+            mean_stroop = mean(stroop_time, na.rm = TRUE), sd_stroop = sd(stroop_time, na.rm = TRUE),
+            mean_tmtb = mean(cer_tmt_b1, na.rm = TRUE), sd_tmtb = sd(cer_tmt_b1, na.rm = TRUE),
+            mean_mmse = mean(mmse, na.rm = TRUE), sd_mmse = sd(mmse, na.rm = TRUE),
+            mean_nmm = mean(nmm, na.rm = TRUE), sd_nmm = sd(nmm, na.rm = TRUE)
+  )
+NeuroMET$z_score_animals <- (NeuroMET$cer_vf_anim_count - sum$mean_animals) / sum$sd_animals
+NeuroMET$z_score_s <- (NeuroMET$cer_vf_s_count - sum$mean_s) / sum$sd_s
+NeuroMET$z_score_digitsymbol <- (NeuroMET$ds_total_score - sum$mean_digitsymbol) / sum$sd_digitsymbol
+NeuroMET$z_score_stroop <- (NeuroMET$stroop_time - sum$mean_stroop) / sum$sd_stroop
+NeuroMET$z_score_stroop_inv <- -1*(NeuroMET$z_score_stroop)
+NeuroMET$z_score_tmtb <- (NeuroMET$cer_tmt_b1 - sum$mean_tmtb) / sum$sd_tmtb
+NeuroMET$z_score_tmtb_inv <- -1*(NeuroMET$z_score_tmtb)
+NeuroMET$z_score_mmse <- (NeuroMET$mmse - sum$mean_mmse) / sum$sd_mmse
+NeuroMET$z_score_nmm <- (NeuroMET$nmm - sum$mean_nmm) / sum$sd_nmm
+
+#calculate executive function if not more than 3 items are missing
+NeuroMET <- NeuroMET %>% 
+  select(record_id, Visit, z_score_animals, z_score_s, z_score_digitsymbol, z_score_stroop_inv, z_score_tmtb_inv) %>%
+  filter(rowSums(is.na(.)) <= 2) %>%
+  rowwise() %>%
+  mutate(exefct = mean(c(z_score_animals, z_score_s, z_score_digitsymbol, z_score_stroop_inv, z_score_tmtb_inv), na.rm = TRUE)) %>%
+  ungroup() %>%
+  select(record_id, Visit,exefct) %>%
+  full_join(NeuroMET, by = c("record_id", "Visit"))
+
+#biomarkers
+NeuroMET$Ab40 <- as.numeric(NeuroMET$`Ab40_pg/mL_VUmc`)
+NeuroMET$Ab42 <- as.numeric(NeuroMET$`Ab42_pg/mL_Vumc`)
+NeuroMET$Ab42_40 <- NeuroMET$Ab42/NeuroMET$Ab40
+NeuroMET$pTau <- as.numeric(NeuroMET$`pTau181_pg/mL_Vumc`)
+NeuroMET$GFAP <- as.numeric(NeuroMET$`GFAP_pg/mL_Vumc`)
+NeuroMET$nfl <- as.numeric(NeuroMET$`NfL_pg/mL_Vumc`)
+
+NeuroMET$Myo <- as.numeric(NeuroMET$`Ins Conc`)
+NeuroMET$Myo[NeuroMET$Myo == "NaN"] <- NA
+NeuroMET$NAA <- as.numeric(NeuroMET$`NAA Conc`)
+NeuroMET$NAA[NeuroMET$NAA == "NaN"] <- NA
+
+# For weighted analyses of MRS data, CRLB are mutated to weights (mean = 1)
+NeuroMET$Ins_aCRLB <- as.numeric(NeuroMET$`Ins CRLB abs`) # absolute CRLB
+NeuroMET$Ins_inv_aCRLB <- 1/((NeuroMET$Ins_aCRLB)^2) # reciprocal and squared aCRLB
+NeuroMET$Ins_CRLB <- ((NeuroMET$Ins_inv_aCRLB - mean(NeuroMET$Ins_inv_aCRLB, na.rm =TRUE))/ (max(NeuroMET$Ins_inv_aCRLB, na.rm =TRUE) - min(NeuroMET$Ins_inv_aCRLB, na.rm =TRUE)))+1
+mean(NeuroMET$Ins_CRLB, na.rm = TRUE)   # should be 1 
+sum(NeuroMET$Ins_CRLB, na.rm=TRUE)      # should be number of participants
+
+NeuroMET$NAA_aCRLB <- as.numeric(NeuroMET$`NAA CRLB abs`) # absolute CRLB
+NeuroMET$NAA_inv_aCRLB <- 1/((NeuroMET$NAA_aCRLB)^2) # reciprocal and squared aCRLB
+NeuroMET$NAA_CRLB <- ((NeuroMET$NAA_inv_aCRLB - mean(NeuroMET$NAA_inv_aCRLB, na.rm =TRUE))/ (max(NeuroMET$NAA_inv_aCRLB, na.rm =TRUE) - min(NeuroMET$NAA_inv_aCRLB, na.rm =TRUE)))+1
+mean(NeuroMET$NAA_CRLB, na.rm = TRUE)   # should be 1 
+sum(NeuroMET$NAA_CRLB, na.rm=TRUE)      # should be number of participants
+
+# Exclude MRI ROI volumes with insufficient quality 
+NeuroMET <- NeuroMET %>% mutate(hip_lh_cs= Whole_hippocampus_lh_cs * QC_Hippocampus_subf_lh_cs,
+                                hip_rh_cs = Whole_hippocampus_rh_cs * QC_Hippocampus_subf_rh_cs,
+                                amyg_lh_cs= Whole_amygdala_lh_cs * QC_Amygdala_subf_lh_cs,
+                                amyg_rh_cs=Whole_amygdala_rh_cs * QC_Amygdala_subf_rh_cs,
+                                etiv_cs= EstimatedTotalIntraCranialVol_cs,
+                                hip_lh_long= left_Whole_hippocampus_long * QC_lh_Hip_long,
+                                hip_rh_long= right_Whole_hippocampus_long * QC_rh_Hip_long,
+                                amyg_lh_long= left_Whole_amygdala_long * QC_lh_Amygdala_long,
+                                amyg_rh_long=right_Whole_amygdala_long * QC_rh_Amygdala_long,
+                                parietal_thick_lh_cs = lh_Parietal_lobe_and_PCC_thickness_mean_cs * QC_parietal_ctx_lh_cs,
+                                parietal_thick_rh_cs = rh_Parietal_lobe_and_PCC_thickness_mean_cs * QC_parietal_ctx_rh_cs,
+                                parietal_thick_lh_long = lh_Parietal_lobe_and_PCC_thickness_long * QC_lh_PCC_long,
+                                parietal_thick_rh_long = rh_Parietal_lobe_and_PCC_thickness_long * QC_rh_PCC_long,
+                                etiv_long= EstimatedTotalIntraCranialVol_long) %>% 
+                         mutate(hip_lh_cs = replace(hip_lh_cs, hip_lh_cs==0, NA),
+                                hip_rh_cs = replace(hip_rh_cs, hip_rh_cs==0, NA),
+                                amyg_lh_cs = replace(amyg_lh_cs, amyg_lh_cs==0, NA),
+                                amyg_rh_cs = replace(amyg_rh_cs, amyg_rh_cs==0, NA),
+                                etiv_cs = replace(etiv_cs, etiv_cs==0, NA),
+                                hip_lh_long = replace(hip_lh_long, hip_lh_long==0, NA),
+                                hip_rh_long = replace(hip_rh_long, hip_rh_long==0, NA),
+                                amyg_lh_long = replace(amyg_lh_long, amyg_lh_long==0, NA),
+                                amyg_rh_long = replace(amyg_rh_long, amyg_rh_long==0, NA),
+                                parietal_thick_lh_cs = replace(parietal_thick_lh_cs, parietal_thick_lh_cs==0, NA),
+                                parietal_thick_rh_cs = replace(parietal_thick_rh_cs, parietal_thick_rh_cs==0, NA),
+                                parietal_thick_lh_long = replace(parietal_thick_lh_long, parietal_thick_lh_long==0, NA),
+                                parietal_thick_rh_long = replace(parietal_thick_rh_long, parietal_thick_rh_long==0, NA),
+                                etiv_long = replace(etiv_long, etiv_long==0, NA)
+                                )
+
+# Calculate mean or copy unilateral volume data if other side did not pass quality control
+mean_lh_rh <- function (lh, rh){
+  if (! is.na(lh)){
+    if (! is.na(rh)) {
+      (lh + rh ) /2
+    }
+    else if(is.na(rh)){
+      (lh + lh ) /2
+    }
+  }
+  else if (is.na(lh)){
+    if (! is.na(rh)){
+      (rh + rh ) /2
+    }
+  } else {NA}
+}
+
+NeuroMET <- NeuroMET %>%
+  mutate(Whole_hip_cs = mapply(mean_lh_rh, hip_lh_cs, hip_rh_cs),
+         Whole_amyg_cs = mapply(mean_lh_rh, amyg_lh_cs, amyg_rh_cs),
+         Whole_hip_long = mapply(mean_lh_rh, hip_lh_long, hip_rh_long),
+         Whole_amyg_long = mapply(mean_lh_rh, amyg_lh_long, amyg_rh_long),
+         Whole_parietal_thick_cs = mapply(mean_lh_rh, parietal_thick_lh_cs, parietal_thick_rh_cs),
+         Whole_parietal_thick_long = mapply(mean_lh_rh, parietal_thick_lh_long, parietal_thick_rh_long)
+         )
+
+# mapply gives out lists with NULLs instead of NA. Replace NULL by NA and unlist volumetric data
+NeuroMET$Whole_hip_cs[sapply(NeuroMET$Whole_hip_cs, is.null)] <- NA
+NeuroMET$Whole_amyg_cs[sapply(NeuroMET$Whole_amyg_cs, is.null)] <- NA
+NeuroMET$Whole_hip_long[sapply(NeuroMET$Whole_hip_long, is.null)] <- NA
+NeuroMET$Whole_amyg_long[sapply(NeuroMET$Whole_amyg_long, is.null)] <- NA
+NeuroMET$Whole_parietal_thick_cs[sapply(NeuroMET$Whole_parietal_thick_cs, is.null)] <- NA
+NeuroMET$Whole_parietal_thick_long[sapply(NeuroMET$Whole_parietal_thick_long, is.null)] <- NA
+
+
+NeuroMET <- NeuroMET %>%
+  mutate(Whole_hip_cs = unlist(Whole_hip_cs),
+         Whole_amyg_cs = unlist(Whole_amyg_cs),
+         Whole_hip_long = unlist(Whole_hip_long),
+         Whole_amyg_long = unlist(Whole_amyg_long),
+         Whole_parietal_thick_cs = unlist(Whole_parietal_thick_cs),
+         Whole_parietal_thick_long = unlist(Whole_parietal_thick_long)
+         )
+
+#remove unwanted variables of volume measures
+NeuroMET<- NeuroMET%>% select(-Whole_hippocampus_lh_cs, -Whole_hippocampus_rh_cs,-Whole_amygdala_lh_cs, -Whole_amygdala_rh_cs,
+                              -left_Whole_hippocampus_long, -right_Whole_hippocampus_long, -left_Whole_amygdala_long, -right_Whole_amygdala_long,
+                              -QC_Hippocampus_subf_lh_cs, -QC_Hippocampus_subf_rh_cs, -QC_Amygdala_subf_lh_cs, -QC_Amygdala_subf_rh_cs,
+                              -QC_lh_Hip_long, -QC_rh_Hip_long, -QC_lh_Amygdala_long, -QC_rh_Amygdala_long,
+                              -hip_lh_cs,-hip_rh_cs, -amyg_lh_cs,-amyg_rh_cs,-etiv_cs, -hip_lh_long, -hip_rh_long, -amyg_lh_long, -amyg_rh_long,
+                              -parietal_thick_lh_cs, -parietal_thick_rh_cs, -parietal_thick_lh_long, -parietal_thick_rh_long, -etiv_long)
+
+#adjust to eTIV cross-sectional (adjusted to HC in T1 only)
+ROI_list <- list("Whole_hip_cs", "Whole_amyg_cs")
+NeuroMET_HC_t1 <- NeuroMET %>%
+  filter (diagnose=="HC" & Visit =="t1")
+meanTIV_HC = mean(NeuroMET_HC_t1$EstimatedTotalIntraCranialVol_cs, na.rm = TRUE)
+adj_ROIs <- sapply(ROI_list, function (ROI) {
+  NeuroMET_HC_t1$ROI_HC <- unlist(NeuroMET_HC_t1[, ROI])
+  regr <- lm(ROI_HC ~ EstimatedTotalIntraCranialVol_cs, NeuroMET_HC_t1)
+  slope <- summary(regr)$coefficients[2,1]
+  adjVol = unlist(NeuroMET[, ROI]) - slope * (NeuroMET$EstimatedTotalIntraCranialVol_cs - meanTIV_HC)
+})
+adj_ROIs_cs <- data.frame(record_id = NeuroMET$record_id, Visit = NeuroMET$Visit, as.data.frame(adj_ROIs))%>%
+  mutate(Whole_hip_cs_adj = V1, Whole_amyg_cs_adj = V2)%>%
+  select(-V1, -V2)
+
+#adjust to eTIV longitudinal (adjusted to HC in T1 only)
+ROI_list <- list("Whole_hip_long", "Whole_amyg_long")
+NeuroMET_HC_t1 <- NeuroMET %>%
+  filter (diagnose=="HC" & Visit =="t1")
+meanTIV_HC = mean(NeuroMET_HC_t1$EstimatedTotalIntraCranialVol_long, na.rm = TRUE)
+adj_ROIs <- sapply(ROI_list, function (ROI) {
+  NeuroMET_HC_t1$ROI_HC <- unlist(NeuroMET_HC_t1[, ROI])
+  regr <- lm(ROI_HC ~ EstimatedTotalIntraCranialVol_long, NeuroMET_HC_t1)
+  slope <- summary(regr)$coefficients[2,1]
+  adjVol = unlist(NeuroMET[, ROI]) - slope * (NeuroMET$EstimatedTotalIntraCranialVol_long - meanTIV_HC)
+})
+adj_ROIs_long <- data.frame(record_id = NeuroMET$record_id, Visit = NeuroMET$Visit, as.data.frame(adj_ROIs)) %>%
+  mutate(Whole_hip_long_adj = V1, Whole_amyg_long_adj = V2)%>%
+  select(-V1, -V2)
+
+NeuroMET <- NeuroMET%>%
+  full_join(adj_ROIs_cs, by = c("record_id", "Visit"))%>%
+  full_join(adj_ROIs_long, by = c("record_id", "Visit"))%>%
+  select(-Whole_hip_cs, -Whole_amyg_cs, -Whole_hip_long, -Whole_amyg_long) %>% 
+  # merge cross sectional and longitudinal data. When there is no Whole_hip_long_adj, then select cross-sectional data 
+  mutate(Whole_hip_cs_long = ifelse(is.na(Whole_hip_cs_adj) != is.na(Whole_hip_long_adj), Whole_hip_cs_adj, Whole_hip_long_adj),
+         parietal_thick_cs_long = ifelse(is.na(Whole_parietal_thick_cs) != is.na(Whole_parietal_thick_long), Whole_parietal_thick_cs, Whole_parietal_thick_long)) 
+
+#Connectivities. 
+NeuroMET <- NeuroMET%>%
+  mutate(DMN = Conn_Default,
+         Sal = Conn_SalVentAttn)
+
+# exclude this data because of misregistration 
+NeuroMET<- NeuroMET %>% mutate(DMN = ifelse(NeuroMET$record_id == "NeuroMet080" & NeuroMET$Visit == "t3" | NeuroMET$record_id == "NeuroMet118" & NeuroMET$Visit == "t2", NA, DMN)) 
+NeuroMET<- NeuroMET %>% mutate(Sal = ifelse(NeuroMET$record_id == "NeuroMet080" & NeuroMET$Visit == "t3" | NeuroMET$record_id == "NeuroMet118" & NeuroMET$Visit == "t2", NA, Sal))
+
+# Calulate years
+NeuroMET <- NeuroMET %>%
+  group_by(record_id)%>%
+  mutate(year = as.numeric(as.Date(visit_date_1, format = "%m/%d/%Y") - 
+                             lag(as.Date(visit_date_1, format = "%m/%d/%Y"), default = as.Date(visit_date_1, format = "%m/%d/%Y")[1])
+  ))%>%
+  mutate(year = cumsum(year))%>%
+  mutate(year = round(year/365,2))%>%
+  ungroup()%>%
+  filter (!is.na(record_id))
+
+NeuroMET <- NeuroMET %>%
+  mutate(year2 = case_when(
+    year == 0 ~ 0, 
+    year >= 0.5 & year < 1.5 ~ 1,
+    year >= 1.5 & year < 2.5 ~ 2,
+    year >= 2.5 & year < 3.5 ~ 3,
+    year >= 3.5 & year < 4.5 ~ 4,
+    year >= 4.5 & year < 5.5 ~ 5))
+
+
+```
+
+# Characteristics of the study sample
+
+```{r table_n_visits, echo=FALSE, warning=FALSE, message=FALSE,  results = "asis"}
+
+table_n  <- NeuroMET %>%
+  group_by(diagnose, Visit)%>%
+  tally() %>%
+  spread(diagnose, n)
+
+table_time <- NeuroMET %>% group_by(diagnose, Visit) %>% summarize("time from baseline" = paste0((round(mean(year), 1)), " (", (round(sd(year), 1)) , ")"))%>% pivot_wider(names_from = diagnose, values_from = "time from baseline") 
+
+row.names_table_1 = c("n", "n", "time from V1 [years]", "n","time from V1 [years]", "n","time from V1 [years]","n","time from V1 [years]")
+table_1 <- row.names_table_1 %>% 
+  cbind(table_n[1:2,] %>% rbind(table_time[2,]) %>% rbind(table_n[3,])%>% rbind(table_time[3,])%>% rbind(table_n[4,])%>% rbind(table_time[4,])%>% rbind(table_n[5,])%>% rbind(table_time[5,])) %>%
+  select(-Visit)
+
+table_1 %>%
+  kbl(caption = "**table 1: Observations grouped by diagnosis and visit. Time difference from visit 1 is presented as mean (sd). Further statistical models might contain fewer observations according to data availability.", align = "c")%>%
+    kable_styling(bootstrap_options = "condensed", full_width = F)%>%
+  pack_rows(group_label = "Visit 1", start_row = 1, end_row = 1) %>%
+  pack_rows(group_label = "Visit 2", start_row = 2, end_row = 3) %>%
+  pack_rows(group_label = "Visit 3", start_row = 4, end_row = 5) %>%
+  pack_rows(group_label = "Visit 4", start_row = 6, end_row = 7) %>%
+  pack_rows(group_label = "Visit 5", start_row = 8, end_row = 9)
+
+```
+
+
+```{r patient_characteristics_v1, results = "asis", out.width = "100%"}
+# prepare tests to be used for p-values
+ancova_age_edu <- function(data, variable, by, ... ) {
+  data <- data[c(variable, by, "age", "edu")] #%>% filter(complete.cases(.)) 
+  #  print(data)                              # for check
+  lm(data[[variable]] ~ factor(data[[by]]) + data$age + data$edu) %>% anova() %>% broom::tidy() %>% 
+    filter (term == "factor(data[[by]])") %>% select(p.value)
+}
+
+ancova_age <- function(data, variable, by, ... ) {
+  data <- data[c(variable, by, "age")] #%>% filter(complete.cases(.)) 
+  lm(data[[variable]] ~ factor(data[[by]]) + data$age) %>% anova() %>% broom::tidy() %>% 
+    filter (term == "factor(data[[by]])") %>% select(p.value)
+}
+
+ancova_age_weightIns <- function(data, variable, by, ... ) {
+  data <- data[c(variable, by, "age", "Ins_CRLB")] #%>% filter(complete.cases(.)) 
+  lm(data[[variable]] ~ factor(data[[by]]) + data$age, weights = data$Ins_CRLB) %>% anova() %>% broom::tidy() %>% 
+    filter (term == "factor(data[[by]])") %>% select(p.value)
+}
+
+ancova_age_weightNAA <- function(data, variable, by, ... ) {
+  data <- data[c(variable, by, "age", "NAA_CRLB")] #%>% filter(complete.cases(.)) 
+  lm(data[[variable]] ~ factor(data[[by]]) + data$age, weights = data$NAA_CRLB) %>% anova() %>% broom::tidy() %>% 
+    filter (term == "factor(data[[by]])") %>% select(p.value)
+}
+
+# table consists of 4 stacked tables
+theme_gtsummary_compact()
+
+tbl_summary_1 <- 
+  NeuroMET%>%
+  filter(Visit=="t1") %>%
+  select(diagnose, age, gender, edu, APOEe4)%>%
+  tbl_summary(
+    by = diagnose,
+    label = list(age ~ "Age [years]", gender ~ "Female", edu ~ "Education [years]", APOEe4 ~"APOEe4 carrier"),
+    missing_text = "N missing",
+    digits = list(age ~ 0, edu ~0),
+    type = list(c(age, edu) ~ "continuous", c(gender,APOEe4) ~ "dichotomous"),
+    value =list (APOEe4 ~ "carrier"),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"))%>%
+  add_p(pvalue_fun = function(x) style_pvalue(x, digits = 3))%>%
+  modify_header(label = "",all_stat_cols() ~ "**{level}**<br>N =  {n}", p.value ~ "**p-value**")%>%
+  add_overall(col_label = "**Total**<br> N = {N}")%>%
+  modify_spanning_header(c("stat_1","stat_2","stat_3","stat_4") ~ "**Diagnostic Group**")%>%
+  modify_caption("**Table 1. Patient's characteristics at visit 1**")%>%
+  modify_footnote(c(all_stat_cols(), p.value) ~ NA)
+
+
+tbl_summary_2 <- 
+  NeuroMET%>%
+  filter(Visit=="t1") %>%
+  select(diagnose, age, edu, mmse, nmm, exefct)%>%
+  tbl_summary(
+    by = diagnose,
+    label = list(mmse ~ "MMSE", nmm ~ "NMM", exefct ~ "Executive function"),
+    missing_text = "N missing",
+    type = list(c(mmse, nmm, exefct) ~ "continuous"),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})"))%>%
+  add_stat(fns= c("mmse", "nmm", "exefct") ~ ancova_age_edu, 
+           pvalue_fun = function(x) style_pvalue(x, digits = 3))%>% 
+  modify_header(label = "",all_stat_cols() ~ "**{level}**<br>N =  {n}", p.value ~ "**p-value**")%>%
+  add_overall(col_label = "**Total**<br> N = {N}")%>%
+  modify_spanning_header(c("stat_1","stat_2","stat_3","stat_4") ~ "**Diagnostic Group**")%>%
+  modify_caption("**Table 1. Patient's characteristics at visit 1**")%>%
+  modify_footnote(c(all_stat_cols(), p.value) ~ NA)%>%
+  remove_row_type(c(age, edu), type = "all")%>%
+  modify_fmt_fun(update = p.value ~ function(x) style_pvalue(x, digits = 3))
+
+
+tbl_summary_3 <- 
+  NeuroMET%>%
+  filter(Visit=="t1") %>%
+  select(diagnose, age, Ins_CRLB, NAA_CRLB, Whole_hip_cs_long, parietal_thick_cs_long, DMN, Sal, Myo, NAA)%>%
+  tbl_summary(
+    by = diagnose,
+    label = list(Whole_hip_cs_long ~ "Hippocampus [mm³]", parietal_thick_cs_long ~ "Parietal Cortical Thickness [mm]" , DMN ~ "DMN connectivity", Sal ~ "Salience connectivity", Myo ~ "Myo-inositol [mmol/L]", NAA ~ "NAA [mmol/L]"),
+    missing_text = "N missing",
+    type = list(c(Whole_hip_cs_long, DMN, Sal, Myo, NAA) ~ "continuous"),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})"))%>%
+  add_stat(fns= list(c("Whole_hip_cs_long", "parietal_thick_cs_long", "DMN", "Sal") ~ ancova_age, "Myo" ~ ancova_age_weightIns, "NAA" ~ ancova_age_weightNAA), pvalue_fun = function(x) style_pvalue(x, digits = 3))%>% 
+  modify_header(label = "", all_stat_cols() ~ "**{level}**<br>N =  {n}", p.value  ="**p-value**")%>%
+  add_overall(col_label = "**Total**<br> N = {N}")%>%
+  modify_spanning_header(c("stat_1","stat_2","stat_3","stat_4") ~ "**Diagnostic Group**")%>%
+  modify_caption("**Table 1. Patient's characteristics at visit 1**")%>%
+  modify_footnote(c(all_stat_cols(), p.value) ~ NA)%>%
+  remove_row_type(c(age, Ins_CRLB, NAA_CRLB), type = "all")%>%
+  modify_fmt_fun(update = p.value ~ function(x) style_pvalue(x, digits = 3))
+
+tbl_summary_4 <- 
+  NeuroMET%>%
+  filter(Visit=="t1") %>%
+  select(diagnose, age, Ab42_40, pTau, GFAP, nfl)%>%
+  tbl_summary(
+    by = diagnose,
+    label = list(Ab42_40 ~ "Ab42/40 [pg/mL]", pTau ~ "p-Tau 181 [pg/mL]", GFAP ~ "GFAP [pg/mL]", nfl ~ "nfl [pg/mL]"),
+    missing_text = "N missing",
+    type = list(c(Ab42_40, pTau, GFAP, nfl) ~ "continuous"),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})"))%>%
+  add_stat(fns= list(c("Ab42_40", "pTau", "GFAP", "nfl") ~ ancova_age)) %>%
+  modify_header(label = "",all_stat_cols() ~ "**{level}**<br>N =  {n}", p.value ="**p-value**")%>%
+  add_overall(col_label = "**Total**<br> N = {N}")%>%
+  modify_spanning_header(c("stat_1","stat_2","stat_3","stat_4") ~ "**Diagnostic Group**")%>%
+  modify_caption("**Table 2. Patient's characteristics at visit 1**")%>%
+  modify_footnote(c(all_stat_cols(), p.value) ~ NA)%>%
+  remove_row_type(age, type = "all")%>%
+  modify_fmt_fun(update = p.value ~ function(x) style_pvalue(x, digits = 3))
+
+tbl_stack_ex1 <- tbl_stack(list(tbl_summary_1, tbl_summary_2, tbl_summary_3, tbl_summary_4), group_header  = c("Demographics", "Cognition", "MRI/MRS", "Blood-based Biomarkers"))
+tbl_stack_ex1 <-tbl_stack_ex1%>%  
+  as_gt() %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(groups = everything())
+  ) %>% 
+  gt::tab_source_note(gt::md("Mean (sd) or N(%) are shown for the total study population and for the individual groups. Group differences were tested using Kruskal-Wallis rank sum test (continuous demographics), Pearson's Chi-squared test (dichotomous demographics), multiple regression adjusted for age (MR-based and plasma biomarkers) or adjusted for age and education (cognition). The statistical models for MRS data (myo-inositol and NAA) were additionally weighted based on an estimation of measurement uncertainties of MRS concentrations (Cramér-Rao lower bounds). APOEe4 carrier were identified using TaqMan assays. 
+<br>
+*Abbreviations: Aß = amyloid beta, AD = Alzheimer’s disease, APOEe4 = apolipoprotein E 4 allele, DMN = default mode network, GFAP = glial fibrillary acidic protein, HC = healthy control, MCI = mild cognitive impairment, MMSE = Mini Mental State Examination (Folstein, Folstein, & McHugh, 1975), NAA = N-Acetylaspartic acid, NfL = neurofilament light chain, NMM = NeuroMET Memory Metric, p-Tau 181 = tau phosphorylated at threonine 181, Sal = Salience network, SCD = subjective cognitive decline.*"))
+tbl_stack_ex1
+
+#save table
+#tbl_stack_ex1 %>% as_flex_table() %>% flextable::save_as_docx(path = "C:/Users/[...]/Table_2.docx")
+
+
+```
+# Cross-sectional and longitudinal concentrations of plasma biomarkers
+
+```{r Data preparation_long, include = FALSE}
+#create a variable diagnose_bl
+Diagnose_1 <- NeuroMET %>% filter(Visit == 't1') %>% mutate(diagnose_bl= diagnose) %>% select(record_id, diagnose_bl)
+NeuroMET <- NeuroMET %>%
+  full_join(Diagnose_1, by = "record_id")
+
+#calculate z-scores of variables (Memory vd Rest and exefct are already z-scaled)
+mean_z <- NeuroMET %>%
+  filter(diagnose == 'HC' & Visit == 't1') %>%
+  summarise(across(c(Ab42_40, pTau, GFAP, nfl, nmm, mmse, Whole_hip_cs_long, parietal_thick_cs_long, DMN, Sal, Myo, NAA), base::mean, na.rm = TRUE))
+
+sd_z <- NeuroMET %>%
+  filter(diagnose == 'HC' & Visit == 't1') %>%
+  summarise(across(c(Ab42_40, pTau, GFAP, nfl, nmm, mmse, Whole_hip_cs_long, parietal_thick_cs_long, DMN, Sal, Myo, NAA), stats::sd, na.rm = TRUE))
+
+cols <- list("Ab42_40", "pTau", "GFAP", "nfl", "mmse", "nmm", "Whole_hip_cs_long", "parietal_thick_cs_long", "DMN", "Sal", "Myo", "NAA")
+
+NeuroMET[, paste0("z_score_", cols)] <- lapply(cols, function(col){ 
+  x <- NeuroMET[col]
+  y <- (x - as.vector(mean_z[col])) / as.vector(sd_z[col])
+  y[[1]]
+  })
+
+#rename
+NeuroMET$z_score_hip <- NeuroMET$z_score_Whole_hip_cs_long
+NeuroMET$z_score_parietal_thick <- NeuroMET$z_score_parietal_thick_cs_long
+NeuroMET$z_score_dmn <- NeuroMET$z_score_DMN
+NeuroMET$z_score_sal <- NeuroMET$z_score_Sal
+NeuroMET$z_score_myo <- NeuroMET$z_score_Myo
+NeuroMET$z_score_naa <- NeuroMET$z_score_NAA
+
+# count available bbm data for each visit
+n <- NeuroMET %>% 
+  summarise(nAb42_40 = sum(!is.na(Ab42_40)),
+            npTau = sum(!is.na(pTau)),
+            nGFAP = sum(!is.na(GFAP)),
+            nnfl = sum(!is.na(nfl)))
+
+n <- NeuroMET %>%
+  group_by(Visit) %>%
+  summarise(nAb42_40 = sum(!is.na(Ab42_40)),
+            npTau = sum(!is.na(pTau)),
+            nGFAP = sum(!is.na(GFAP)),
+            nnfl = sum(!is.na(nfl)))%>%
+  bind_rows(n)%>%
+  ungroup()
+```
+
+```{r Models_long_single_variable}
+# Define a function for running linear mixed effects models and computing emmeans [[1]] and emtrends [[2]] with their p-values [[3]]
+run_lmer_emmeans <- function(response_var, data) {
+  data <- data %>% filter(!is.na(.data[[response_var]]) & !is.na(diagnose_bl))
+  model <- lmer(paste0(response_var, " ~ diagnose_bl*year + age + (1|record_id)"), 
+                data = data, 
+                REML = TRUE, na.action = na.omit)
+  em <- emmeans(model, pairwise ~diagnose_bl|year, at = list(year = c(0, 1, 3, 5)))
+  etrends <- emtrends(model, "diagnose_bl", var= "year") 
+  etrendsp <- test(emtrends(model, "diagnose_bl", var= "year"))
+  
+  return(list(em$emmeans, etrends, etrendsp, em$contrasts, confint(em$contrasts), model))
+}
+# Alternative for MRS with CRLB weights
+run_lmer_emmeans_MRS <- function(response_var, CRLB, data) {
+  data <- data %>% filter(!is.na(.data[[response_var]]) & !is.na(diagnose_bl)) %>% mutate(CRLB_2 = .data[[CRLB]])
+  #CRLB_2 <- data %>% select(.data[[CRLB]])
+  #return(data$CRLB_2)
+  model <- lmer(paste0(response_var, " ~ diagnose_bl*year + age + (1|record_id)"),
+                data = data,
+                weights = CRLB_2,
+                REML = TRUE, na.action = na.omit)
+  em <- emmeans(model, pairwise ~diagnose_bl|year, at = list(year = c(0, 1, 3, 5)))
+  etrends <- emtrends(model, "diagnose_bl", var= "year")
+  etrendsp <- test(emtrends(model, "diagnose_bl", var= "year"))
+  return(list(em$emmeans, etrends, etrendsp, em$contrasts, confint(em$contrasts), model))
+}
+
+# Run the function for each response variable of interest
+em_Ab42_40 <- run_lmer_emmeans("Ab42_40", NeuroMET)
+em_pTau <- run_lmer_emmeans("pTau", NeuroMET)
+em_GFAP <- run_lmer_emmeans("GFAP", NeuroMET)
+em_nfl <- run_lmer_emmeans("nfl", NeuroMET)
+
+em_mmse <- run_lmer_emmeans("mmse", NeuroMET)
+em_nmm <- run_lmer_emmeans("nmm", NeuroMET)
+em_exefct <- run_lmer_emmeans("exefct", NeuroMET)
+em_hip <- run_lmer_emmeans("Whole_hip_cs_long", NeuroMET)
+em_parietal_thick <- run_lmer_emmeans("parietal_thick_cs_long", NeuroMET)
+em_dmn <- run_lmer_emmeans("DMN", NeuroMET)
+em_sal <- run_lmer_emmeans("Sal", NeuroMET)
+em_myo <- run_lmer_emmeans_MRS(response_var = "Myo", CRLB = "Ins_CRLB", data = NeuroMET)
+em_naa <- run_lmer_emmeans_MRS(response_var = "NAA", CRLB = "NAA_CRLB", data = NeuroMET)
+```
+
+
+```{r Figure2, echo=FALSE, warning=FALSE, message=FALSE,  results = "asis", fig.align = "center", fig.height = 10, fig.cap = "**Figure 2: Longitudinal concentration changes of plasma Aß42/Aß40, p-Tau 181, GFAP and NfL.** In the SCD group, only plasma p-Tau 181 showed a relevant yearly increase. The AD group however, showed substantially increasing concentrations of p-Tau 181, GFAP and NfL. Concentrations were measured at visit 1 (n = 127), and when available at follow-ups after 1 year (n = 32), 3 years (n = 44), 4 years (n = 31) and 5 years (n = 9). The thin lines link individual concentrations at each available visit. The linear fits are presented with 95% CI (shaded areas) estimated by linear mixed models adjusted for age. For later interpretation of the models, Orange lines represent the mean of the HC group at visit 1 (continuous line) and 1sd towards the pathological direction (dashed line). *Abbreviations: Aß = amyloid beta, AD = Alzheimer’s disease, CI = confidence interval, GFAP = glial fibrillary acidic protein, HC = healthy control, MCI = mild cognitive impairment, NfL= neurofilament light chain, p-Tau 181 = tau phosphorylated at threonine 181, SCD = subjective cognitive decline.*" }
+
+mean_sd <- c("mean", "1sd") %>% cbind (mean_z %>% rbind(mean_z - sd_z) %>% select(Ab42_40) %>% cbind(mean_z %>% rbind(mean_z + sd_z) %>% select(pTau, GFAP, nfl)))
+
+coeff_Ab42_40 <- as.data.frame(em_Ab42_40[[2]])%>% mutate( 
+    coeff= round(year.trend*10^3, 1),
+  lower.CL= format(lower.CL*10^3, nsmall = 1, digits = 1), 
+  upper.CL= format(upper.CL*10^3, nsmall = 1, digits = 1)) %>% 
+  cbind(as.data.frame(em_Ab42_40[[3]]%>% 
+                        mutate(p.value = format(round(p.value, 3),nsmall = 3)) %>% 
+                        select(p = p.value)))%>%
+  mutate(coeff = paste0("ß = ", coeff,  " [", lower.CL, "; ", upper.CL, "]"," * 10<sup>-3</sup>", "<br>p = ", p)) %>% 
+  select(diagnose_bl, coeff)
+coeff_pTau <- as.data.frame(em_pTau[[2]])%>% mutate(coeff= format(round(year.trend, 2),nsmall = 2), lower.CL= format(round(lower.CL, 2),nsmall = 2), upper.CL= format(round(upper.CL, 2),nsmall = 2)) %>% cbind(as.data.frame(em_pTau[[3]]%>% mutate(p.value = format(round(p.value, 3),nsmall = 3)) %>% select(p = p.value)))%>%
+  mutate(coeff = paste0("ß = ", coeff, " [", lower.CL, "; ", upper.CL,"]", '\n', "p = ", p)) %>% select(diagnose_bl, coeff)
+coeff_GFAP <- as.data.frame(em_GFAP[[2]])%>% mutate(coeff= format(round(year.trend, 0),nsmall = 0), lower.CL= format(round(lower.CL, 0),nsmall = 0), upper.CL= format(round(upper.CL, 0),nsmall = 0)) %>% cbind(as.data.frame(em_GFAP[[3]]%>% mutate(p.value = format(round(p.value, 3),nsmall = 3)) %>% select(p = p.value)))%>%
+  mutate(coeff = paste0("ß = ", coeff, " [", lower.CL, "; ", upper.CL, "]", '\n', "p = ", p)) %>% select(diagnose_bl, coeff)
+coeff_nfl <- as.data.frame(em_nfl[[2]])%>% mutate(coeff= format(round(year.trend, 1),nsmall = 1), lower.CL= format(round(lower.CL, 1),nsmall = 1), upper.CL= format(round(upper.CL, 1),nsmall = 1))
+
+p_nfl <- as.data.frame(em_nfl[[3]]%>% mutate(p.value = format(round(p.value, 3),nsmall = 3))) %>% select(p = p.value) 
+                                                                                                                                  p_nfl$p[p_nfl$p < 0.001] <- "< 0.001"
+p_nfl2 <-c("=", "=", "=", "") %>% cbind(p_nfl)%>% mutate(p = paste0(., " ", p)) %>%select(-".")
+coeff_nfl_2<- coeff_nfl%>% cbind(p_nfl2)%>% mutate(coeff = paste0("ß = ", coeff, " [", lower.CL, "; ", upper.CL, "]", '\n', "p ", p)) %>% select(diagnose_bl, coeff)
+
+
+plot_longitudinal <- function(EM_model, parameter, parameter2, lable_y) {
+ggplot (EM_model,aes(x=year, y = emmean, group=diagnose_bl))+
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL, fill = diagnose_bl), alpha = .50) +
+  geom_line(aes(colour = diagnose_bl), size = 2)+
+  geom_line(data= NeuroMET %>% filter(!is.na(diagnose_bl) & !is.na({{parameter}})), mapping=aes(x = year, y = {{parameter}}, group= record_id, col=diagnose_bl), alpha= 0.5)+
+  geom_point(data=NeuroMET %>% filter(!is.na(diagnose_bl) & !is.na({{parameter}})), mapping=aes(x = year, y = {{parameter}}, group= record_id, col=diagnose_bl), size=1, alpha= 0.5)+
+  labs(x="Time [years]", y=lable_y, fill = "diagnosis at baseline")+
+  facet_wrap(~diagnose_bl,nrow = 1)+
+  scale_fill_manual(values =c("gray50", "seagreen", "deepskyblue3" ,"#225EA8"))+
+  scale_color_manual(values =c("gray50", "seagreen", "deepskyblue3" ,"#225EA8"))+
+  guides(col = "none")+
+  theme_bw(base_size=10)+
+  theme(legend.position = 'top') 
+}
+
+figure_Ab42_40_long <- plot_longitudinal(EM_model = as.data.frame(em_Ab42_40[[1]]), parameter = Ab42_40, parameter2 = "Ab42_40", lable_y= "Aß 42/40 [pg/mL]")+ 
+  geom_hline(data= mean_sd %>% filter(. =="mean") , aes(yintercept= Ab42_40), color = "orange", size = 0.4)+    # HC mean
+  geom_hline(data= mean_sd %>% filter(. =="1sd"), aes(yintercept= Ab42_40), color = "orange", linetype = "longdash",  size = 0.4)+
+  geom_richtext(aes(x=year, y = emmean, label = lab), 
+    data = data.frame(year = 5, emmean = 0.1, diagnose_bl = factor(c("HC", "SCD", "MCI", "AD"), levels = c("HC", "SCD", "MCI", "AD")), lab = coeff_Ab42_40$coeff),vjust = "inward", hjust = "inward", size= 3, parse = T,fill = NA, label.colour = NA)+
+  scale_y_continuous(breaks = c(0.03, 0.05, 0.07, 0.09, 0.11), labels=c(expression("30*10"^{-3}~""), expression("50*10"^{-3}~""), expression("70*10"^{-3}~""), expression("90*10"^{-3}~""), expression("110*10"^{-3}~"")))
+
+
+figure_pTau_long <- plot_longitudinal(EM_model = as.data.frame(em_pTau[[1]]), parameter = pTau, parameter2 = "pTau", lable_y= "p-Tau 181 [pg/mL]")+ 
+  geom_hline(data= mean_sd %>% filter(. =="mean") , aes(yintercept= pTau), color = "orange", size = 0.4)+    # HC mean
+  geom_hline(data= mean_sd %>% filter(. =="1sd"), aes(yintercept= pTau), color = "orange", linetype = "longdash",  size = 0.4)+
+  geom_text(aes(x=year, y = emmean, label = lab), 
+    data = data.frame(year = 5, emmean = 9, diagnose_bl = factor(c("HC", "SCD", "MCI", "AD"), levels = c("HC", "SCD", "MCI", "AD")), lab = coeff_pTau$coeff),vjust = "inward", hjust = "inward", size= 3)
+figure_GFAP_long <- plot_longitudinal(EM_model = as.data.frame(em_GFAP[[1]]), parameter = GFAP, parameter2 = "GFAP", lable_y= "GFAP [pg/mL]")+ 
+  geom_hline(data= mean_sd %>% filter(. =="mean") , aes(yintercept= GFAP), color = "orange", size = 0.4)+    # HC mean
+  geom_hline(data= mean_sd %>% filter(. =="1sd"), aes(yintercept= GFAP), color = "orange", linetype = "longdash",  size = 0.4)+ 
+  geom_text(aes(x=year, y = emmean, label = lab), 
+    data = data.frame(year = 5, emmean = 520, diagnose_bl = factor(c("HC", "SCD", "MCI", "AD"), levels = c("HC", "SCD", "MCI", "AD")), lab = coeff_GFAP$coeff),vjust = "inward", hjust = "inward", size= 3)
+figure_nfl_long <- plot_longitudinal(EM_model = as.data.frame(em_nfl[[1]]), parameter = nfl, parameter2 = "nfl", lable_y= "NfL [pg/mL]")+ 
+  geom_hline(data= mean_sd %>% filter(. =="mean") , aes(yintercept= nfl), color = "orange", size = 0.4)+    # HC mean
+  geom_hline(data= mean_sd %>% filter(. =="1sd"), aes(yintercept= nfl), color = "orange", linetype = "longdash",  size = 0.4)+ 
+  geom_text(aes(x=year, y = emmean, label = lab), 
+    data = data.frame(year = 5, emmean = 130, diagnose_bl = factor(c("HC", "SCD", "MCI", "AD"), levels = c("HC", "SCD", "MCI", "AD")), lab = coeff_nfl_2$coeff),vjust = "inward", hjust = "inward", size= 3)
+
+# arrange plots to one figure using the package patchwork
+figure_2 <- (figure_Ab42_40_long + rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())) / 
+(figure_pTau_long+ rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text.x = element_blank()))/ 
+(figure_GFAP_long + rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text.x = element_blank())) / 
+(figure_nfl_long+ theme(strip.background = element_blank(), strip.text.x = element_blank())) +
+  plot_layout(guides = 'collect')& theme(legend.position = 'top')
+figure_2 
+
+ggsave("figure_2.tiff", height = 11, width = 8, dpi = 600)
+
+
+```
+
+```{r Figure3, echo=FALSE, warning=FALSE, message=FALSE,  results = "asis", fig.align = "center", fig.height = 4, fig.cap = "**Figure 3: Subgroup analyses of longitudinal trajectories of plasma p-Tau 181, GFAP and NfL based on plasma Aß42/40 changes (decliners / non-decliners).** Aß decliners only showed a substantial increase of p-Tau 181 in the SCD group, but not the HC group. Participants were classified into Aß decliners/non-decliners by a 2-means cluster analysis based on their difference between Aß42/40 at first visit and last visit (mean differenceAß decliner = -0.5sd, nAß  decliner = 22, mean differenceAß non- decliner = 0.2sd, nAß non- decliner = 31). Longitudinal trajectories were extracted from linear mixed models only including participants of the HC and SCD groups, correcting for age, sex and education. *Abbreviations: Aß = amyloid beta, CI = confidence interval, GFAP = glial fibrillary acidic protein, HC = healthy control, NfL= neurofilament light chain, p-Tau 181 = tau phosphorylated at threonine 181, SCD = subjective cognitive decline.*"}
+
+#Create Ab_change (difference between last and first visit)
+NeuroMET_Figure3<- NeuroMET %>%
+  group_by(record_id)%>%
+  filter(row_number() ==1 | row_number() ==n())%>%   #pick first and last visit
+  mutate(Ab_diff = z_score_Ab42_40 - lag(z_score_Ab42_40))%>%
+  ungroup() 
+
+#create clusters
+clusters_2 <- Ckmeans.1d.dp((NeuroMET_Figure3 %>% filter((diagnose_bl =="HC" | diagnose_bl =="SCD") & !is.na(Ab_diff)))$Ab_diff, 2)
+#clusters_2
+
+#join clusters to NeuroMET Data
+NeuroMET_Figure3_2 <- data.frame(NeuroMET_Figure3 %>% filter((diagnose_bl =="HC" | diagnose_bl =="SCD") & !is.na(Ab_diff)), clusters_2$cluster)%>%
+  select(record_id, Ab_diff, clusters_2.cluster)
+NeuroMET_Figure3b <- left_join(NeuroMET, NeuroMET_Figure3_2, by = c("record_id"))
+
+#models
+long_pTau_abdecliner <- lmer(z_score_pTau ~ year * Ab_diff*diagnose_bl + age + (1 | record_id), 
+                               data = NeuroMET_Figure3b %>% filter(diagnose_bl == 'HC'| diagnose_bl == 'SCD'))
+em_trends_pTau_abdecliner <-emtrends(long_pTau_abdecliner, pairwise ~ diagnose_bl|Ab_diff, var = "year", at = list(Ab_diff = clusters_2$centers))
+em_means_pTau_abdecliner <- emmeans(long_pTau_abdecliner, pairwise ~diagnose_bl|Ab_diff|year, at = list(year = c(0, 5), Ab_diff = clusters_2$centers))
+
+long_GFAP_abdecliner <- lmer(z_score_GFAP ~ year * Ab_diff*diagnose_bl + age + (1 | record_id), 
+                             data = NeuroMET_Figure3b %>% filter(diagnose_bl == 'HC'| diagnose_bl == 'SCD'))
+em_trends_GFAP_abdecliner <-emtrends(long_GFAP_abdecliner, pairwise ~ diagnose_bl|Ab_diff, var = "year", at = list(Ab_diff = clusters_2$centers))
+em_means_GFAP_abdecliner <- emmeans(long_GFAP_abdecliner, pairwise ~diagnose_bl|Ab_diff|year, at = list(year = c(0,5), Ab_diff = clusters_2$centers))
+
+long_nfl_abdecliner <- lmer(z_score_nfl ~ year * Ab_diff*diagnose_bl + age + (1 | record_id), 
+                             data = NeuroMET_Figure3b %>% filter(diagnose_bl == 'HC'| diagnose_bl == 'SCD'))
+em_trends_nfl_abdecliner <-emtrends(long_nfl_abdecliner, pairwise ~ diagnose_bl|Ab_diff, var = "year", at = list(Ab_diff = clusters_2$centers))
+em_means_nfl_abdecliner <- emmeans(long_nfl_abdecliner, pairwise ~diagnose_bl|Ab_diff|year, at = list(year = c(0, 5), Ab_diff = clusters_2$centers))
+
+data_plot <- data.frame(bbm = "p-Tau 181", em_means_pTau_abdecliner$emmeans)%>% mutate(Ab_decliner = factor(Ab_diff, labels = c("Aß decliner", "Aß non-decliner"))) %>%
+  rbind(data.frame(bbm = "GFAP", em_means_GFAP_abdecliner$emmeans)%>% mutate(Ab_decliner = factor(Ab_diff, labels = c("Aß decliner", "Aß non-decliner"))))%>%
+  rbind(data.frame(bbm = "NfL", em_means_nfl_abdecliner$emmeans)%>% mutate(Ab_decliner = factor(Ab_diff, labels = c("Aß decliner", "Aß non-decliner"))))%>%
+  mutate(bbm= as.factor(bbm))
+
+#plots
+ggplot (data= data_plot %>% filter(!(bbm=="Aß 42/40")), aes(x = year, y = emmean, color =diagnose_bl))+
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL,fill = diagnose_bl), alpha = .10, colour = NA)+ 
+  geom_line(alpha= 0.7, size = 2)+
+  ylab("biomarker concentration (z-scaled)") +
+  theme_bw(base_size=10)+
+  theme(legend.position="top")+
+  guides(col = guide_legend(title="Diagnosis at baseline"), fill = "none")+
+  scale_x_discrete(limits=c("1", "2","3","4", "5"))+
+  scale_fill_manual(values =c("gray50", "seagreen"))+
+  scale_color_manual(values =c("gray50", "seagreen"))+
+  facet_grid(Ab_decliner~factor(bbm, levels = c('Aß 42/40', 'p-Tau 181', 'GFAP', 'NfL')))
+ggsave("figure_3.tiff", height = 4, width = 4, dpi = 600)
+
+#table with all slopes
+table_slopes_decliner <- data.frame(em_trends_pTau_abdecliner$emtrends)%>% mutate("p-Tau 181" = paste0(round(year.trend, digits = 2), " [", round(lower.CL,2), "; ", round(upper.CL,2), "]"))%>%
+  select (diagnose_bl, Ab_diff,"p-Tau 181") %>% cbind(p = round(data.frame(test(em_trends_pTau_abdecliner)$emtrends)$p.value,3))%>%
+  cbind(
+    data.frame(em_trends_GFAP_abdecliner$emtrends)%>% mutate("GFAP" = paste0(round(year.trend, digits = 2), " [", round(lower.CL,2), "; ", round(upper.CL,2), "]"))%>%
+      select ("GFAP") %>% cbind(p = round(data.frame(test(em_trends_GFAP_abdecliner)$emtrends)$p.value,3))
+  )%>%
+  cbind(
+    data.frame(em_trends_nfl_abdecliner$emtrends)%>% mutate("NfL" = paste0(round(year.trend, digits = 2), " [", round(lower.CL,2), "; ", round(upper.CL,2), "]"))%>%
+      select ("NfL") %>% cbind(p = round(data.frame(test(em_trends_nfl_abdecliner)$emtrends)$p.value,3))
+  )
+#table_slopes_decliner
+``` 
+
+# Cross-sectional association between plasma biomarkers and MR-based parameters 
+
+```{r Models_associations_cs_and_long}
+
+#Ab42_40
+outcome_vars <- as.list(NeuroMET%>%filter(!is.na(z_score_Ab42_40) & !is.na(diagnose_bl))%>%select(z_score_nmm, exefct, z_score_hip, z_score_parietal_thick, z_score_dmn, z_score_sal))
+models_Ab42_40 <- lapply(outcome_vars, function(outcome_var) {
+  model_lmer <- lmer(outcome_var ~ z_score_Ab42_40*year + age + gender + edu + (1|record_id),
+       data = NeuroMET%>%filter(!is.na(z_score_Ab42_40) & !is.na(diagnose_bl)),
+       REML = TRUE, na.action = na.omit)
+  emtrends_cs <- emtrends(model_lmer, "year", var = "z_score_Ab42_40", at= list(year = 0)) #crosssectional association
+  em_change <- emmeans(model_lmer,pairwise~z_score_Ab42_40*year, at = list(z_score_Ab42_40 = c(0, -1), year = c(0,1)))
+  return(list("1", "2", "3", emtrends_cs, nobs(model_lmer), nobs_bl = (summary(model_lmer))[3]$devcomp$dims[5], model_lmer, em_change))
+})
+
+#Ab42_40_MRS
+models_Ab42_40_MRS <- function(outcome_var, CRLB) {
+  data <- NeuroMET %>% mutate(outcome_var_2 = .data[[outcome_var]], CRLB_2= .data[[CRLB]])
+  model_lmer <- lmer(outcome_var_2 ~ z_score_Ab42_40*year + age + gender + edu + (1|record_id),
+       data = data %>% filter(!is.na(z_score_Ab42_40) & !is.na(diagnose_bl)), 
+       weights = CRLB_2, REML = TRUE, na.action = na.omit)
+  emtrends_cs <- emtrends(model_lmer, "year", var = "z_score_Ab42_40", at= list(year = 0))
+  em_change <- emmeans(model_lmer,pairwise~z_score_Ab42_40*year, at = list(z_score_Ab42_40 = c(0, -1), year = c(0,1)))#crosssectional association
+  return(list("1", "2", "3", emtrends_cs, nobs(model_lmer), nobs_bl = (summary(model_lmer))[3]$devcomp$dims[5], model_lmer, em_change))
+}
+
+models_Ab42_40_MRS <- mapply(models_Ab42_40_MRS, outcome_var = c("z_score_myo","z_score_NAA"), CRLB = c("Ins_CRLB", "NAA_CRLB"))
+models_Ab42_40$z_score_myo <- models_Ab42_40_MRS[1:8]
+models_Ab42_40$z_score_NAA <- models_Ab42_40_MRS[9:16]
+
+#pTau
+outcome_vars <- as.list(NeuroMET%>%filter(!is.na(z_score_pTau) & !is.na(diagnose_bl))%>%select(z_score_nmm, exefct, z_score_hip, z_score_parietal_thick, z_score_dmn, z_score_sal))
+models_pTau <- lapply(outcome_vars, function(outcome_var) {
+  model_lmer <- lmer(outcome_var ~ z_score_pTau*year + age + gender + edu + (1|record_id),
+       data = NeuroMET%>%filter(!is.na(z_score_pTau) & !is.na(diagnose_bl)),
+       REML = TRUE, na.action = na.omit)
+  emtrends_cs <- emtrends(model_lmer, "year", var = "z_score_pTau", at= list(year = 0)) #crosssectional association
+  em_change <- emmeans(model_lmer,pairwise~z_score_pTau*year, at = list(z_score_pTau = c(0, 1), year = c(0,1)))
+  return(list("1", "2", "3",emtrends_cs, nobs(model_lmer), nobs_bl = (summary(model_lmer))[3]$devcomp$dims[5], model_lmer, em_change))
+})
+#pTau_MRS
+models_pTau_MRS <- function(outcome_var, CRLB, data) {
+  data <- NeuroMET %>% mutate(outcome_var_2 = .data[[outcome_var]], CRLB_2= .data[[CRLB]])
+  model_lmer <- lmer(outcome_var_2 ~ z_score_pTau*year + age + gender + edu + (1|record_id),
+       data = data %>% filter(!is.na(z_score_pTau) & !is.na(diagnose_bl)), 
+       weights = CRLB_2, REML = TRUE, na.action = na.omit)
+  emtrends_cs <- emtrends(model_lmer, "year", var = "z_score_pTau", at= list(year = 0)) #crosssectional association
+  em_change <- emmeans(model_lmer,pairwise~z_score_pTau*year, at = list(z_score_pTau = c(0, 1), year = c(0,1)))
+  return(list("1", "2", "3",emtrends_cs, nobs(model_lmer), nobs_bl = (summary(model_lmer))[3]$devcomp$dims[5], model_lmer, em_change))
+}
+models_pTau_MRS <- mapply(models_pTau_MRS, outcome_var = c("z_score_myo","z_score_NAA"), CRLB = c("Ins_CRLB", "NAA_CRLB"))
+models_pTau$z_score_myo <- models_pTau_MRS[1:8]
+models_pTau$z_score_NAA <- models_pTau_MRS[9:16]
+#GFAP
+outcome_vars <- as.list(NeuroMET%>%filter(!is.na(z_score_GFAP) & !is.na(diagnose_bl))%>%select(z_score_nmm, exefct, z_score_hip, z_score_parietal_thick, z_score_dmn, z_score_sal))
+models_GFAP <- lapply(outcome_vars, function(outcome_var) {
+  model_lmer <- lmer(outcome_var ~ z_score_GFAP*year + age + gender + edu + (1|record_id),
+       data = NeuroMET%>%filter(!is.na(z_score_GFAP) & !is.na(diagnose_bl)),
+       REML = TRUE, na.action = na.omit)
+  emtrends_cs <- emtrends(model_lmer, "year", var = "z_score_GFAP", at= list(year = 0)) #crossectional association
+  em_change <- emmeans(model_lmer,pairwise~z_score_GFAP*year, at = list(z_score_GFAP = c(0, 1), year = c(0,1)))
+ return(list("1", "2", "3",emtrends_cs, nobs(model_lmer), nobs_bl = (summary(model_lmer))[3]$devcomp$dims[5], model_lmer, em_change))
+})
+#GFAP_MRS
+models_GFAP_MRS <- function(outcome_var, CRLB, data) {
+  data <- NeuroMET %>% mutate(outcome_var_2 = .data[[outcome_var]], CRLB_2= .data[[CRLB]])
+  model_lmer <- lmer(outcome_var_2 ~ z_score_GFAP*year + age + gender + edu + (1|record_id),
+       data = data %>% filter(!is.na(z_score_GFAP) & !is.na(diagnose_bl)), 
+       weights = CRLB_2, REML = TRUE, na.action = na.omit)
+ emtrends_cs <- emtrends(model_lmer, "year", var = "z_score_GFAP", at= list(year = 0)) #crossectional association
+  em_change <- emmeans(model_lmer,pairwise~z_score_GFAP*year, at = list(z_score_GFAP = c(0, 1), year = c(0,1)))
+ return(list("1", "2", "3",emtrends_cs, nobs(model_lmer), nobs_bl = (summary(model_lmer))[3]$devcomp$dims[5], model_lmer, em_change))
+}
+models_GFAP_MRS <- mapply(models_GFAP_MRS, outcome_var = c("z_score_myo","z_score_NAA"), CRLB = c("Ins_CRLB", "NAA_CRLB"))
+models_GFAP$z_score_myo <- models_GFAP_MRS[1:8]
+models_GFAP$z_score_NAA <- models_GFAP_MRS[9:16]
+#nfl
+outcome_vars <- as.list(NeuroMET%>%filter(!is.na(z_score_nfl) & !is.na(diagnose_bl))%>%select(z_score_nmm, exefct, z_score_hip, z_score_parietal_thick, z_score_dmn, z_score_sal))
+models_nfl <- lapply(outcome_vars, function(outcome_var) {
+  model_lmer <- lmer(outcome_var ~ z_score_nfl*year + age + gender + edu + (1|record_id),
+       data = NeuroMET%>%filter(!is.na(z_score_nfl) & !is.na(diagnose_bl)),
+       REML = TRUE, na.action = na.omit)
+  emtrends_cs <- emtrends(model_lmer, "year", var = "z_score_nfl", at= list(year = 0)) #crossectional association
+  em_change <- emmeans(model_lmer,pairwise~z_score_nfl*year, at = list(z_score_nfl = c(0, 1), year = c(0,1)))
+ return(list("1", "2", "3",emtrends_cs, nobs(model_lmer), nobs_bl = (summary(model_lmer))[3]$devcomp$dims[5], model_lmer, em_change))
+})
+
+#nfl_MRS
+models_nfl_MRS <- function(outcome_var, CRLB, data) {
+  data <- NeuroMET %>% mutate(outcome_var_2 = .data[[outcome_var]], CRLB_2= .data[[CRLB]])
+  model_lmer <- lmer(outcome_var_2 ~ z_score_nfl*year + age + gender + edu + (1|record_id),
+       data = data %>% filter(!is.na(z_score_nfl) & !is.na(diagnose_bl)), 
+       weights = CRLB_2, REML = TRUE, na.action = na.omit)
+  emtrends_cs <- emtrends(model_lmer, "year", var = "z_score_nfl", at= list(year = 0)) #crossectional association
+  em_change <- emmeans(model_lmer,pairwise~z_score_nfl*year, at = list(z_score_nfl = c(0, 1), year = c(0,1)))
+  return(list("1", "2", "3",emtrends_cs, nobs(model_lmer), nobs_bl = (summary(model_lmer))[3]$devcomp$dims[5], model_lmer, em_change))
+}
+models_nfl_MRS <- mapply(models_nfl_MRS, outcome_var = c("z_score_myo","z_score_NAA"), CRLB = c("Ins_CRLB", "NAA_CRLB"))
+models_nfl$z_score_myo <- models_nfl_MRS[1:8]
+models_nfl$z_score_NAA <- models_nfl_MRS[9:16]
+```
+
+```{r Figure_4, echo=FALSE, warning=FALSE, message=FALSE, fig.height = 7, fig.width = 5, results = "asis", fig.align = "center", fig.cap = "**Figure 4: Associations between concentrations of plasma Aß42/40, p-Tau 181, GFAP and NfL and z-transformed parameters of cognition, structural and functional MRI, and MRS.** Largest effect sizes were consistently found for either p-Tau 181 or GFAP. Effects for Aß42/40 were smaller with large uncertainties. Effects for NMM, i.e. memory ability, were considerably larger than for any of the MR-based parameters. Depending on data availability, observations of a maximum of 127 participants were included. The effects are presented with 95% CI (horizontal bars) estimated by linear mixed models adjusted for age, sex and education. Models including the MRS parameters Myo-inositol and NAA were additionally weighted based on a measure of uncertainty (CRLB). Connectivity measures for the DMN and Sal were acquired at resting-state. *Abbreviations: Aß = amyloid beta, CI = confidence interval, CRLB = Cramer-Rao Lower Bound, DMN = Default mode network, GFAP = glial fibrillary acidic protein, NAA = N-Acetylaspartic acid, NfL= neurofilament light chain, NMM = NeuroMET memory metric, obs. = observations, part. = participants, p-Tau 181 = tau phosphorylated at threonine 181, Sal = Salience network. *" }
+
+coefficients_figure <- function (model) {
+  model_emtrends <- model[[4]] 
+  c(n = as.data.frame(model[[6]]), trend = as.data.frame(model_emtrends)[1,2], lower = as.data.frame(model_emtrends)[1,5], upper = as.data.frame(model_emtrends)[1,6], p = as.data.frame(test(model_emtrends))[1,6])
+}
+
+m_Ab42_40 <- mapply(coefficients_figure, models_Ab42_40[1:8])
+m_pTau <- mapply(coefficients_figure, models_pTau)
+m_GFAP <- mapply(coefficients_figure, models_GFAP)
+m_nfl <- mapply(coefficients_figure, models_nfl)
+df <- data.frame(BBM = "Ab42_40", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_Ab42_40)))%>%
+  rbind (data.frame(BBM = "pTau", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_pTau))))%>%
+  rbind (data.frame(BBM = "GFAP", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_GFAP))))%>%
+  rbind (data.frame(BBM = "nfl", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_nfl)))) %>%
+  mutate(BBM = factor(BBM, levels = c("Ab42_40", "pTau", "GFAP", "nfl"), labels= c("Aß 42/40", "p-Tau 181", "GFAP", "NfL")))
+row.names(df) <- NULL
+
+df_Figure <- df %>% 
+  mutate(
+  outcome_vars = outcome_vars %>%
+    fct_recode("NMM" = "z_score_nmm", "Executive Function"  = "exefct", "Hippocampus Volume" = "z_score_hip", "Parietal Cortical Thickness" = "z_score_parietal_thick", "DMN Connectivity" = "z_score_dmn","Sal Connectivity" = "z_score_sal",  "Myo-inositol" = "z_score_myo","NAA" = "z_score_NAA")%>% fct_relevel("NMM" , "Executive Function" , "Hippocampus Volume", "Parietal Cortical Thickness" ,"DMN Connectivity","Sal Connectivity", "Myo-inositol" ,"NAA")
+  )%>%
+  mutate(BBM = factor(BBM, levels = c("NfL", "GFAP", "p-Tau 181", "Aß 42/40")))
+
+Figure4 <- df_Figure %>%
+  ggplot(mapping = aes(x = as.vector(unlist(trend)),
+                     y = outcome_vars,
+                     color = BBM))+
+  geom_point(position = position_dodge(width =0.5), size = 1)+
+  geom_linerange(aes(xmin=as.vector(unlist(lower)), xmax=as.vector(unlist(upper))), position = position_dodge(width =0.5), size= 0.8)+
+  xlab(label = "std. ß coefficient")+
+  ylab(NULL)+
+  guides(color = guide_legend(title = "Plasma biomarkers", reverse= TRUE))+
+  ylim(rev(levels(df_Figure$outcome_vars)))+ # falls die reihenfolge der Outcome_vars nicht stimmt
+  geom_vline(xintercept = 0, color = "dark grey")+
+  theme_minimal()+
+  theme(strip.placement = "outside",
+        strip.background = element_rect(fill = "#EEEEEE", color = "#FFFFFF"),
+        legend.position = "right",
+        legend.text=element_text(size=12),
+        legend.key.size =  unit(0.5, 'cm'),
+        legend.title = element_text(size  = 12),
+        panel.spacing = unit(1.5, "lines"),
+        axis.text.y= element_blank(),
+        axis.text.x=element_text(size=10),
+        #axis.title.x = element_text(size=10)
+        )+
+  scale_color_manual(values=c('tomato', 'steelblue', 'seagreen', 'orange2'))
+
+#Add nobs in figure:
+figure_outcome_vars <- data.frame(outcome_vars_figure = c("NMM", "Executive Function", "Hippocampus Volume", "Parietal Cortical Thickness","DMN Connectivity", "Sal Connectivity", "Myo-inositol", "NAA")) %>% cbind(nparticipants = unlist(df_Figure$n.model..6..[1:8]))%>%
+  mutate(outcome_vars_figure = factor(outcome_vars_figure, levels = rev(outcome_vars_figure)))
+
+p_names <- figure_outcome_vars %>%
+  ggplot(aes(y = factor(outcome_vars_figure)))+
+  geom_text(aes(x = 0, label = outcome_vars_figure), hjust = "right", size = 4)+
+  theme_void()
+
+n <- figure_outcome_vars %>%
+  ggplot () +
+geom_text(
+    aes(x = 0, 
+        y = outcome_vars_figure, label = nparticipants),
+    hjust = 0, size = 4,
+    fontface = "plain")+
+  theme_void() +
+  ggtitle("n")+ theme(plot.title = element_text(size = 11, face = "bold", hjust =0.6, vjust = 0))
+
+layout <- c(
+  area(t = 0, l = 0, b = 15, r = 60), 
+  area(t = 0, l = 25, b = 15, r = 45), 
+  area(t = 0, l = 47, b = 15, r = 70)
+  )
+# final plot arrangement
+Figure_4b <- p_names + n + Figure4 + plot_layout(design = layout)
+Figure_4b
+ggsave("Figure_4.tiff", width = 7.5, height = 6, dpi = 600)
+```
+
+```{r table_A2, echo=FALSE, warning=FALSE, message=FALSE, results = "asis", fig.align = "center" }
+
+table_associations_cs_1 <- df %>%
+  mutate("std. ß[95% CI]" = paste0(round(as.vector(unlist(trend)),2), " [", round(as.vector(unlist(lower)),2), "; ", round(as.vector(unlist(upper)),2), "]"),
+         "p" = round(as.vector(unlist(p)),3))%>%
+  select(BBM, outcome_vars, n = as.vector(unlist("n.model..6..")), "std. ß[95% CI]", p)%>%
+  mutate(outcome_vars = outcome_vars %>%
+    fct_recode("NMM" = "z_score_nmm", "Executive Function"  = "exefct", "Hippocampus Volume" = "z_score_hip", "Parietal Cortical Thickness" = "z_score_parietal_thick", "DMN Connectivity" = "z_score_dmn","Sal Connectivity"= "z_score_sal",  "Myo-inositol" = "z_score_myo","NAA" = "z_score_NAA")%>% fct_relevel(
+     "NMM" , "Executive Function" , "Hippocampus Volume", "Parietal Cortical Thickness" ,"DMN Connectivity", "Sal Connectivity",  "Myo-inositol" ,"NAA"))
+
+table_associations_cs_1$p[table_associations_cs_1$p <  0.001] <- "<0.001"
+table_associations_cs_1 <- table_associations_cs_1%>% mutate(p = ifelse(p <0.05, paste0("**", p, "**"),p))
+table_associations_cs_1<- table_associations_cs_1%>%arrange(outcome_vars)
+
+table_associations_cs_2 <- table_associations_cs_1%>%filter(BBM =="Aß 42/40")%>% select (outcome_vars, n, "std. ß[95% CI]", p) %>%
+  cbind(table_associations_cs_1%>%filter(BBM =="p-Tau 181") %>% select ("std. ß[95% CI]", p))%>%
+  cbind(table_associations_cs_1%>%filter(BBM =="GFAP")%>% select ("std. ß[95% CI]", p))%>%
+  cbind(table_associations_cs_1%>%filter(BBM =="NfL")%>% select ("std. ß[95% CI]", p))
+options(knitr.kable.NA = "")
+
+table_A2 <- kable (table_associations_cs_2,  col.names = c("z-scores", "n", "std. ß [95% CI]", "p", "std. ß [95% CI]", "p", "std. ß [95% CI]", "p", "std. ß [95% CI]", "p"), caption = "**Table A2: Associations between concentrations of plasma Aß42/40, p-Tau 181, GFAP and NfL and parameters of cognition, structural and functional MRI and MRS at visit 1.**", align = "c", format="html") %>%
+  kable_classic() %>%
+  add_header_above(c("  " = 2, "**Aß 42/40**" = 2, "**p-Tau 181**" = 2, "**GFAP**" = 2, "**Nfl**" = 2))%>%
+  footnote("The effects [95% CI] were estimated by linear mixed models adjusted for age, sex and education. Models including the MRS markers Myo-inositol and NAA were additionally weighted based on a measure of uncertainty (CRLB). All plasma biomarkers and outcome variables were z-standardized in order to allow for comparisons.*Abbreviations: Aß = amyloid beta, CI = confidence interval, CRLB = Cramer-Rao Lower Bound, DMN = default mode network, GFAP = glial fibrillary acidic protein, NAA = N-Acetylaspartic acid, NfL= neurofilament light chain, NMM = NeuroMET Memory Metric, p-Tau 181 = phosphorylated tau at threonine 181, Sal = Salience network.*",
+           general_title = "")
+
+table_A2
+```
+
+# Longitudinal association between bbms and outcome measures
+
+```{r changes_long, echo=FALSE, warning=FALSE, message=FALSE, results = "asis", fig.align = "center" }
+coefficients_changes_long <- function (model) {
+  em_changes <- model[[8]] 
+  as.data.frame(c(n_obs = as.data.frame(model[[5]]), n_participants = as.data.frame(model[[6]]), 
+                  change0_0 = data.frame(em_changes$contrasts[2])$estimate, 
+                  change0_0_lower = (confint(em_changes)$contrasts)$lower.CL[2], 
+                  change0_0_upper = (confint(em_changes)$contrasts)$upper.CL[2], 
+                  change0_0_p = data.frame(unlist(em_changes)$contrasts)$`p.value`[2], 
+                  change0_1 = data.frame(em_changes$contrasts[3])$estimate, 
+                  change0_1_lower = (confint(em_changes)$contrasts)$lower.CL[3], 
+                  change0_1_upper = (confint(em_changes)$contrasts)$upper.CL[3], 
+                  change0_1_p = data.frame(unlist(em_changes)$contrasts)$`p.value`[3],
+                  change1_1 = data.frame(em_changes$contrasts[5])$estimate, 
+                  change1_1_lower = (confint(em_changes)$contrasts)$lower.CL[5], 
+                  change1_1_upper = (confint(em_changes)$contrasts)$upper.CL[5], 
+                  change1_1_p = data.frame(unlist(em_changes)$contrasts)$`p.value`[5]
+    ))
+}
+
+m_Ab42_40 <- mapply(coefficients_changes_long, models_Ab42_40)  
+m_pTau <- mapply(coefficients_changes_long, models_pTau)
+m_GFAP <- mapply(coefficients_changes_long, models_GFAP)
+m_nfl <- mapply(coefficients_changes_long, models_nfl)
+df <- data.frame(bbm = "Ab42_40", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_Ab42_40)))%>% 
+  rbind (data.frame(bbm = "pTau", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_pTau))))%>%
+  rbind (data.frame(bbm = "GFAP", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_GFAP))))%>%
+  rbind (data.frame(bbm = "nfl", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_nfl))))%>%
+  mutate(bbm = factor(bbm, levels = c("Ab42_40", "pTau", "GFAP", "nfl"), labels= c("Aß 42/40", "p-Tau 181", "GFAP", "NfL")))
+row.names(df) <- NULL
+```
+
+```{r Figure_5, echo=FALSE, warning=FALSE, message=FALSE,  results = "asis", out.width = "100%", fig.align = "center", fig.cap="**Figure 5: Yearly change of cognitive, structural and functional MRI, and MRS parameters depending on changes of plasma Aß42/40, p-Tau 181, GFAP and NfL.** To allow for comparison, all parameters were z-transformed. Yearly changes were estimated for discrete changes of plasma biomarker concentrations after one year: stable concentrations of the mean of the HC group (normal stable, blue), change of concentration from the mean of the HC group to 1sd towards the pathological direction as indicated in figure 1 (normal > abnormal, red), stable concentrations of 1sd towards the pathological direction (abnormal stable, green). Depending on data availability, a maximum of 127 participants with 243 observations were included. The effects are presented with 95% CI estimated by linear mixed models adjusted for age, sex and education. Models including the MRS markers Myo-inositol and NAA were additionally weighted based on a measure of uncertainty (CRLB). *Abbreviations: Aß = amyloid beta, CI = confidence interval, CRLB = Cramer-Rao Lower Bound, DMN = Default mode network, GFAP = glial fibrillary acidic protein, HC = healthy control, NAA = N-Acetylaspartic acid, NfL= neurofilament light chain, NMM = NeuroMET Memory Metric, p-Tau 181 = tau phosphorylated at threonine 181, Sal = Salience network.*"}
+
+names_change <- c(paste0("normal stable"),paste0("normal > abnormal"), paste0("abnormal stable"))
+names_change <- rep(names_change, 32 )
+
+df_Figure5 <- df %>%
+        select(bbm, outcome_vars, n_obs.model..5.., n_participants.model..6.., change0_0, change0_1, change1_1) %>%
+        pivot_longer(cols = -c(1,2,3,4), names_to = "bbm_change", values_to = "z_Score") %>%
+  cbind(df %>% select(bbm, outcome_vars, n_obs.model..5.., n_participants.model..6.., ends_with("lower")) %>% 
+        pivot_longer(cols = -c(1,2,3,4), names_to = "bbm_change", values_to = "lowerCI")%>%
+        select (lowerCI))%>%
+  cbind(df %>% select(bbm, outcome_vars, n_obs.model..5.., n_participants.model..6.., ends_with("upper")) %>% 
+        pivot_longer(cols = -c(1,2,3,4), names_to = "bbm_change", values_to = "upperCI")%>%
+        select (upperCI))%>% 
+  mutate(
+   outcome_vars = (outcome_vars %>%
+    fct_recode("NMM" = "z_score_nmm", "Executive Function"  = "exefct", "Hippocampus Volume" = "z_score_hip", "Parietal Cortical Thickness" = "z_score_parietal_thick", "DMN Connectivity" = "z_score_dmn", "Sal Connectivity"= "z_score_sal",  "Myo-inositol" = "z_score_myo","NAA" = "z_score_NAA")%>% fct_relevel("NMM", "Executive Function" , "Hippocampus Volume", "Parietal Cortical Thickness" ,"DMN Connectivity","Sal Connectivity", "Myo-inositol" ,"NAA")))%>%
+    cbind(names_change) %>%
+    mutate(names_change = factor(names_change, levels = c("normal > abnormal", "abnormal stable", "normal stable"))) 
+
+Figure5 <- df_Figure5 %>%
+  unnest()%>%
+    mutate_if(is.numeric, funs(. * -1)) %>%
+  ggplot(mapping = aes(x = z_Score,
+                     y = outcome_vars,
+                     color = as.factor(names_change)))+
+  geom_point(position = position_dodge(width =0.5), size = 0.8)+
+  geom_linerange(aes(xmin=lowerCI, xmax=upperCI), position = position_dodge(width =0.5), size= 0.7)+
+  xlab(label = "yearly change (z-score)")+
+  ylab(NULL)+
+  guides(color = guide_legend(title = "Plasma biomarker change after 1 year",reverse = TRUE, title.position = "top", title.hjust = 0.5))+
+  facet_grid(~bbm)+
+  ylim(rev(levels(df_Figure5$outcome_vars)))+ 
+  geom_vline(xintercept = 0, color = "dark grey")+
+  theme_minimal()+
+  theme(strip.placement = "outside",
+        strip.background = element_rect(fill = "#EEEEEE", color = "#FFFFFF"),
+        legend.position = "top",
+        legend.text=element_text(size=9),
+        legend.key.size =  unit(0.5, 'cm'),
+        legend.title = element_text(size  = 9),
+        axis.text.y= element_blank(),
+        panel.spacing = unit(1.5, "lines"))+
+  scale_color_manual(values=c('orange2', 'steelblue','tomato','seagreen'))
+Figure5
+
+figure_outcome_vars <- data.frame(outcome_vars_figure = c("NMM", "Executive Function", "Hippocampus Volume", "Parietal Cortical Thickness","DMN Connectivity", "Sal Connectivity", "Myo-inositol", "NAA")) %>% cbind(nparticipants = unlist((df_Figure5%>%filter(bbm_change == "change0_0") %>% select(n_participants.model..6..)))[1:8])%>%
+cbind(nobs = unlist((df_Figure5%>%filter(bbm_change == "change0_0") %>% select(n_obs.model..5..)))[1:8])%>%
+  mutate(outcome_vars_figure = factor(outcome_vars_figure, levels = rev(outcome_vars_figure)))
+
+p_names <- figure_outcome_vars %>%
+  #mutate(outcome_vars_figure = factor(outcome_vars_figure, levels = rev(outcome_vars_figure)))
+  ggplot(aes(y = factor(outcome_vars_figure)))+
+  geom_text(aes(x = 0, label = outcome_vars_figure), hjust = "right", size = 3.2,
+    color = "gray20")+
+  theme_void()
+
+npart <- figure_outcome_vars %>%
+  ggplot () +
+geom_text(
+    aes(x = 0, 
+        y = outcome_vars_figure, label = nparticipants),
+    hjust = 0.5, size = 3.2,
+    fontface = "plain",
+    color = "gray20")+
+  theme_void() +
+  ggtitle("n \n part.")+ theme(plot.title = element_text(size = 9, face = "bold", hjust =0.5, vjust = -33, color = "gray30"))
+
+nobs <- figure_outcome_vars %>%
+  ggplot () +
+geom_text(
+    aes(x = 0, 
+        y = outcome_vars_figure, label = nobs),
+    hjust = 0.5, size = 3.2,
+    fontface = "plain",
+    color = "gray20")+
+  theme_void() +
+  ggtitle("n \n obs.")+ theme(plot.title = element_text(size = 9, face = "bold", hjust =0.5, vjust = -33, color = "gray30"))
+  
+
+layout <- c(
+  area(t = 0, l = 0, b = 15, r = 110), 
+  area(t = 0, l = 58, b = 15, r = 73),
+  area(t = 0, l = 73, b = 15, r = 83),
+  area(t = 0, l = 85, b = 15, r = 200)
+  )
+# final plot arrangement
+Figure_5b <- p_names + npart + nobs + Figure5 + plot_layout(design = layout)
+Figure_5b
+ggsave("Figure_5b.tiff", dpi = 600)
+
+```
+
+# Supplemental Material 
+
+```{r figureA1, results = "asis", fig.height = 3, out.width = "100%", fig.cap = "**Figure A 1: Concentration of plasma biomarkers at visit 1.** Horizontals lines indicate the mean of the HC group (continuous line) and 1sd towards the pathological direction (long dashed line). **Abbreviations: AD = Alzheimer’s disease, Aß = amyloid beta, GFAP = glial fibrillary acidic protein, HC = healthy control, MCI = mild cognitive impairment, NfL= neurofilament light chain, p-Tau 181 = tau phosphorylated at threonine 181, SCD = subjective cognitive decline.**"}
+
+breaks_mean <- mean_sd%>%pivot_longer (cols = -c(1), names_to = "bbm", values_to = "mean")%>%filter(. == "mean")%>%mutate(bbm= c('Aß 42/40', 'p-Tau 181', 'GFAP','Nfl'))%>% select(-.)
+breaks_sd <- mean_sd%>%pivot_longer (cols = -c(1), names_to = "bbm", values_to = "sd")%>%filter(. == "1sd")%>%mutate(bbm= c('Aß 42/40', 'p-Tau 181', 'GFAP','Nfl'))%>% select(-.)
+
+figure_A1 <- NeuroMET %>%
+  filter(Visit == "t1")%>%
+  select(record_id, diagnose, "Aß 42/40" = Ab42_40, "p-Tau 181" = pTau, "GFAP" = GFAP, "Nfl" = nfl)%>%
+  pivot_longer(cols = 3:6, names_to = "bbm", values_drop_na = TRUE)%>%
+  group_by(diagnose)%>%
+  ggplot()+ 
+  aes(x= diagnose, y= value, fill = diagnose)+
+  geom_boxplot(outlier.shape = NA, alpha = 0.95, lwd = 0.3, alpha = 0.6)+
+  geom_jitter(position=position_jitter(0.2), size = 1, alpha = 0.4)+
+  xlab(NULL)+
+  ylab("concentration pg/mL") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))+ ####remove background grid
+  scale_fill_manual(values=c("#F8766D", "#00BFC4" , "#CD9600","gray50"))+
+  facet_wrap(~factor(bbm, levels = c('Aß 42/40', 'p-Tau 181', 'GFAP','Nfl')), scales = "free", ncol = 4)+
+  geom_hline(data= breaks_mean, aes(yintercept= mean), color = "dark grey", size = 0.3)+
+  geom_hline(data= breaks_sd, aes(yintercept= sd), linetype = "longdash", color = "dark grey", size = 0.3)+
+  theme(legend.position = "none")
+figure_A1
+ggsave("figure_A1.tiff", height = 3,  dpi = 600)
+
+```
+
+
+
+```{r FigureA2, echo=FALSE, warning=FALSE, message=FALSE,  results = "asis", fig.align = "center", fig.height = 24, fig.cap = "**Figure A2: Longitudinal changes of cognitive and MR-based parameters.** The thin lines link individual concentrations at each available visit. The linear fits are presented with 95% CI (shaded areas) estimated by linear mixed models adjusted for age (analogue to model 2). Models including MRS measurements were weighted based on an estimate for measurement uncertainty (CRLB). *Abbreviations: AD = Alzheimer’s disease, CI = confidence interval, CRLB = Cramér-Rao lower bound, HC = healthy control, MCI = mild cognitive impairment, NAA = N-Acetylaspartic acid, NMM= NeuroMET Memory Metric, SCD = subjective cognitive decline.* "}
+
+figure_nmm_long <- plot_longitudinal(EM_model = as.data.frame(em_nmm[[1]]), parameter = nmm, parameter2 = "nmm", lable_y= "NMM")
+figure_exefct_long <- plot_longitudinal(EM_model = as.data.frame(em_exefct[[1]]), parameter = exefct, parameter2 = "exefct", lable_y= "Executive function")
+figure_hip_long <- plot_longitudinal(EM_model = as.data.frame(em_hip[[1]]), parameter = Whole_hip_cs_long, parameter2 = "Whole_hip_cs_long", lable_y= "Hippocampus volume [mm³]")
+figure_parietal_long <- plot_longitudinal(EM_model = as.data.frame(em_parietal_thick[[1]]), parameter = parietal_thick_cs_long, parameter2 = "parietal_thick_cs_long", lable_y= "Parietal thickness [mm²]")
+figure_dmn_long <- plot_longitudinal(EM_model = as.data.frame(em_dmn[[1]]), parameter = DMN, parameter2 = "DMN", lable_y= "Default Mode Network")
+figure_sal_long <- plot_longitudinal(EM_model = as.data.frame(em_sal[[1]]), parameter = Sal, parameter2 = "Sal", lable_y= "Salience Network")
+figure_myo_long <- plot_longitudinal(EM_model = as.data.frame(em_myo[[1]]), parameter = Myo, parameter2 = "Myo", lable_y= "Myoinositol [mmol/L]")
+figure_naa_long <- plot_longitudinal(EM_model = as.data.frame(em_naa[[1]]), parameter = NAA, parameter2 = "NAA", lable_y= "NAA [mmol/L]")
+
+# arrange plots to one figure using the package patchwork
+figure_A2 <- (figure_nmm_long+ rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()))/ 
+(figure_exefct_long + rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text.x = element_blank())) /
+(figure_hip_long + rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text.x = element_blank())) / 
+(figure_parietal_long + rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text.x = element_blank())) /
+(figure_dmn_long + rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text.x = element_blank())) / 
+(figure_sal_long + rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text.x = element_blank())) /
+(figure_myo_long + rremove("xlab") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(), strip.text.x = element_blank())) /
+  (figure_naa_long + theme(strip.background = element_blank(), strip.text.x = element_blank()))/
+plot_layout(guides = 'collect')& theme(legend.position = 'bottom')
+figure_A2
+ggsave("figure_A2.tiff", height = 14, width = 8, dpi = 600)
+
+```
+
+```{r Table_A3, echo=FALSE, warning=FALSE, message=FALSE, results = "asis", fig.align = "center" }
+coefficients_long <- function (model) {
+  model_lmer <- model[[7]] 
+  confint_lmer <- confint(model_lmer)
+  as.data.frame(c(n_obs = as.data.frame(model[[5]]), n_participants = as.data.frame(model[[6]]), fixef_interact = fixef(model_lmer)[7], fixef_interact_lower = confint_lmer[9,1], fixef_interact_upper = confint_lmer[9,2], p = (car::Anova(model_lmer)$`Pr(>Chisq)`)[6]  
+    ))
+}
+
+m_Ab42_40 <- mapply(coefficients_long, models_Ab42_40)  
+m_pTau <- mapply(coefficients_long, models_pTau)
+m_GFAP <- mapply(coefficients_long, models_GFAP)
+m_nfl <- mapply(coefficients_long, models_nfl)
+df <- data.frame(bbm = "Ab42_40", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_Ab42_40))%>% select("n obs"= n_obs.model..5.., "n participants" = n_participants.model..6.., "interaction" = fixef_interact.z_score_Ab42_40.year, "lower" =fixef_interact_lower, "upper" = fixef_interact_upper, p))%>%
+  rbind (data.frame(bbm = "pTau", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_pTau))%>% select("n obs"= n_obs.model..5.., "n participants" = n_participants.model..6.., "interaction" = fixef_interact.z_score_pTau.year, "lower" =fixef_interact_lower, "upper" = fixef_interact_upper, p)))%>%
+  rbind (data.frame(bbm = "GFAP", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_GFAP))%>% select("n obs"= n_obs.model..5.., "n participants" = n_participants.model..6.., "interaction" = fixef_interact.z_score_GFAP.year, "lower" =fixef_interact_lower, "upper" = fixef_interact_upper, p)))%>%
+  rbind (data.frame(bbm = "nfl", outcome_vars = c(names(outcome_vars), "z_score_myo","z_score_NAA"), as.data.frame(t(m_nfl))%>% select("n obs"= n_obs.model..5.., "n participants" = n_participants.model..6.., "interaction" = fixef_interact.z_score_nfl.year, "lower" =fixef_interact_lower, "upper" = fixef_interact_upper, p))) %>%
+  mutate(bbm = factor(bbm, levels = c("Ab42_40", "pTau", "GFAP", "nfl"), labels= c("Ab 42/40", "p-Tau 181", "GFAP", "NfL")))
+row.names(df) <- NULL
+table_associations_long_1 <- df %>%
+  mutate("std. ß[95% CI]" = paste0(round(as.vector(unlist(interaction)),2), " [", round(as.vector(unlist(lower)),2), "; ", round(as.vector(unlist(upper)),2), "]"),
+         "p" = round(as.vector(unlist(p)),3))%>%
+  select(bbm, outcome_vars, "n participants" = as.vector(unlist("n.participants")), "n obs" = as.vector(unlist("n.obs")), "std. ß[95% CI]", p)%>%
+  mutate(outcome_vars = outcome_vars %>%
+    fct_recode("NMM" = "z_score_nmm", "Executive Function"  = "exefct", "Hippocampus Volume" = "z_score_hip", "Parietal Cortical Thickness" = "z_score_parietal_thick", "DMN Connectivity" = "z_score_dmn", "Sal Connectivity" = "z_score_sal",  "Myo-inositol" = "z_score_myo","NAA" = "z_score_NAA")%>% fct_relevel( "NMM", "Executive Function" , "Hippocampus Volume", "Parietal Cortical Thickness" ,"DMN Connectivity", "Sal Connectivity", "Myo-inositol" ,"NAA"))
+
+table_associations_long_1$p[table_associations_long_1$p <  0.001] <- "<0.001"
+table_A3a <- table_associations_long_1%>% mutate(p = ifelse(p <0.05, paste0("**", p, "**"),p))
+table_A3a<- table_associations_long_1%>%arrange(outcome_vars)
+table_associations_long_2 <- table_associations_long_1%>%filter(bbm =="Ab 42/40")%>% select (outcome_vars, "n obs", "n participants", "std. ß[95% CI]", p) %>%
+  cbind(table_associations_long_1%>%filter(bbm =="p-Tau 181") %>% select ("std. ß[95% CI]", p))%>%
+  cbind(table_associations_long_1%>%filter(bbm =="GFAP")%>% select ("std. ß[95% CI]", p))%>%
+  cbind(table_associations_long_1%>%filter(bbm =="NfL")%>% select ("std. ß[95% CI]", p))
+
+options(knitr.kable.NA = "")
+table_A3 <- kable (table_associations_long_2,  col.names = c("z-scores", "n obs", "n participants", "std. ß [95% CI]", "p", "std. ß [95% CI]", "p", "std. ß [95% CI]", "p", "std. ß [95% CI]", "p"), caption = "**Table A3: Interaction effects of plasma Aß42/40, p-Tau 181, GFAP and NfL over time on changes of parameters of cognition, structural and functional MRI and MRS.** Positive effects can be interpreted as stronger changes of the AD-related outcome over time, while negative effects explain a weakening of the effects over time. The interaction effects do not contain any information on the directionality of the effects of plasma biomarker concentration on MR-based parameters and have to be interpreted together with the main effect, which is why we provide effects for discrete changes of plasma biomarker concentration in the main text + table A4.", align = "c") %>%
+  kable_classic() %>%
+  add_header_above(c("  " = 3, "**Aß 42/40 x year**" = 2, "**p-Tau 181 x year**" = 2, "**GFAP x year**" = 2, "**NfL x year**" = 2))%>%
+  footnote("The effects [95% CI] were estimated by linear mixed models adjusted for age, sex and education. Models including the MRS markers Myo-inositol and NAA were additionally weighted based on a measure of uncertainty (CRLB). All plasma biomarkers, MR-based and cognition parameters were z-standardized in order to allow for comparisons. *Abbreviations: Aß = amyloid beta, CI = confidence interval, CRLB = Cramer-Rao Lower Bound, DMN = Default Mode Network, GFAP = glial fibrillary acidic protein, NAA = N-Acetylaspartic acid, NfL= neurofilament light chain, NMM = NeuroMET Memory Metric, obs. = observations, part. = participants, p-Tau 181 = tau phosphorylated at threonine 181, Sal = Salience network. *",
+           general_title = "")
+  # %>%
+  # save_kable("results/table_A3.html")
+table_A3
+```
